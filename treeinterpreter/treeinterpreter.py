@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import numpy as np
 import sklearn
-
+from sklearn.externals.joblib import Parallel, delayed
 from sklearn.ensemble.forest import ForestClassifier, ForestRegressor
 from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier, _tree
 from distutils.version import LooseVersion
@@ -49,8 +49,8 @@ def _predict_tree(model, X, joint_contribution=False):
     leaf_to_path = {}
     #map leaves to paths
     for path in paths:
-        leaf_to_path[path[-1]] = path         
-    
+        leaf_to_path[path[-1]] = path
+
     # remove the single-dimensional inner arrays
     values = model.tree_.value.squeeze()
     # reshape if squeezed into a single float
@@ -68,18 +68,18 @@ def _predict_tree(model, X, joint_contribution=False):
         biases = np.tile(values[paths[0][0]], (X.shape[0], 1))
         line_shape = (X.shape[1], model.n_classes_)
     direct_prediction = values[leaves]
-    
-    
+
+
     #make into python list, accessing values will be faster
     values_list = list(values)
     feature_index = list(model.tree_.feature)
-    
+
     contributions = []
     if joint_contribution:
         for row, leaf in enumerate(leaves):
             path = leaf_to_path[leaf]
-            
-            
+
+
             path_features = set()
             contributions.append({})
             for i in range(len(path) - 1):
@@ -90,26 +90,26 @@ def _predict_tree(model, X, joint_contribution=False):
                 contributions[row][tuple(sorted(path_features))] = \
                     contributions[row].get(tuple(sorted(path_features)), 0) + contrib
         return direct_prediction, biases, contributions
-        
+
     else:
 
         for row, leaf in enumerate(leaves):
             for path in paths:
                 if leaf == path[-1]:
                     break
-            
+
             contribs = np.zeros(line_shape)
             for i in range(len(path) - 1):
-                
+
                 contrib = values_list[path[i+1]] - \
                          values_list[path[i]]
                 contribs[feature_index[path[i]]] += contrib
             contributions.append(contribs)
-    
+
         return direct_prediction, biases, np.array(contributions)
 
 
-def _predict_forest(model, X, joint_contribution=False):
+def _predict_forest(model, X, joint_contribution=False, n_jobs=1):
     """
     For a given RandomForestRegressor, RandomForestClassifier,
     ExtraTreesRegressor, or ExtraTreesClassifier returns a triple of
@@ -120,49 +120,51 @@ def _predict_forest(model, X, joint_contribution=False):
     contributions = []
     predictions = []
 
-    
-    if joint_contribution:
-        
-        for tree in model.estimators_:
-            pred, bias, contribution = _predict_tree(tree, X, joint_contribution=joint_contribution)
 
-            biases.append(bias)
-            contributions.append(contribution)
-            predictions.append(pred)
-        
-        
+    if joint_contribution:
+
+        outputs = Parallel(n_jobs=n_jobs)(
+            delayed(_predict_tree)(
+                tree, X, joint_contribution=joint_contribution)
+            for tree in model.estimators_)
+
+        predictions = [out[0] for out in outputs]
+        biases = [out[1] for out in outputs]
+        contributions = [out[2] for out in outputs]
+
         total_contributions = []
-        
+
         for i in range(len(X)):
             contr = {}
             for j, dct in enumerate(contributions):
                 for k in set(dct[i]).union(set(contr.keys())):
                     contr[k] = (contr.get(k, 0)*j + dct[i].get(k,0) ) / (j+1)
 
-            total_contributions.append(contr)    
-            
+            total_contributions.append(contr)
+
         for i, item in enumerate(contribution):
             total_contributions[i]
             sm = sum([v for v in contribution[i].values()])
-                
 
-        
+
+
         return (np.mean(predictions, axis=0), np.mean(biases, axis=0),
             total_contributions)
     else:
-        for tree in model.estimators_:
-            pred, bias, contribution = _predict_tree(tree, X)
 
-            biases.append(bias)
-            contributions.append(contribution)
-            predictions.append(pred)
-        
-        
+        outputs = Parallel(n_jobs=n_jobs)(
+            delayed(_predict_tree)(tree, X)
+            for tree in model.estimators_)
+
+        predictions = [out[0] for out in outputs]
+        biases = [out[1] for out in outputs]
+        contributions = [out[2] for out in outputs]
+
         return (np.mean(predictions, axis=0), np.mean(biases, axis=0),
             np.mean(contributions, axis=0))
 
 
-def predict(model, X, joint_contribution=False):
+def predict(model, X, joint_contribution=False, n_jobs=1):
     """ Returns a triple (prediction, bias, feature_contributions), such
     that prediction ≈ bias + feature_contributions.
     Parameters
@@ -175,7 +177,7 @@ def predict(model, X, joint_contribution=False):
 
     X : array-like, shape = (n_samples, n_features)
     Test samples.
-    
+
     joint_contribution : boolean
     Specifies if contributions are given individually from each feature,
     or jointly over them
@@ -187,7 +189,7 @@ def predict(model, X, joint_contribution=False):
         for classification
     * bias, shape = (n_samples) for regression and (n_samples, n_classes) for
         classification
-    * contributions, If joint_contribution is False then returns and  array of 
+    * contributions, If joint_contribution is False then returns and  array of
         shape = (n_samples, n_features) for regression or
         shape = (n_samples, n_features, n_classes) for classification, denoting
         contribution from each feature.
@@ -204,7 +206,8 @@ def predict(model, X, joint_contribution=False):
         return _predict_tree(model, X, joint_contribution=joint_contribution)
     elif (isinstance(model, ForestClassifier) or
           isinstance(model, ForestRegressor)):
-        return _predict_forest(model, X, joint_contribution=joint_contribution)
+        return _predict_forest(model, X, joint_contribution=joint_contribution,
+                               n_jobs=n_jobs)
     else:
         raise ValueError("Wrong model type. Base learner needs to be a "
                          "DecisionTreeClassifier or DecisionTreeRegressor.")
